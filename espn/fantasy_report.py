@@ -138,7 +138,19 @@ Use web search for the newest injury reports, beat-writer news, and matchup cont
 ## Start/Sit Calls
 ## Waiver Wire Targets
 ## Trade Opportunities
-For trades, name 1-2 realistic proposals using another listed team and its roster construction. Be decisive, specific, and brief."""
+For trades, name 1-2 realistic proposals using another listed team and its roster construction. Be decisive, specific, and brief.
+
+STYLE RULES:
+- Sound like a funny, high-energy frat bro giving real fantasy advice: casual,
+  confident, and playful, but never hostile or mean-spirited.
+- Your very first line must be a standalone joke in the form "[Player] in the
+  [funny place]" followed by one fitting emoji. Base it on a player who balled
+  out, flopped, or affected a manager's fantasy week. Example: "Puka in the
+  worst" or  "Alec Pierce in being constantly injured" or even "The Panthers
+   in getting dogwalked by Caleb Williams". Do not put a markdown header before this line. This should be a 
+  roast of a player or a shout-out for a player who had a great week.
+- Use 1-2 fitting emojis per section. Keep the actual recommendations specific
+  and useful beneath the jokes."""
 
 
 def generate_report(prompt):

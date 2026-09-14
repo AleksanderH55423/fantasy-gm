@@ -30,7 +30,11 @@ def build_combined_report():
     espn_week, espn_report = collect_report("ESPN League", espn.build_report)
     weeks = [str(week) for week in (sleeper_week, espn_week) if week is not None]
     title = f"# Fantasy GM Weekly Report{' — Week ' + ' / '.join(weeks) if weeks else ''}"
-    return title + "\n\n" + sleeper_report + "\n\n---\n\n" + espn_report
+    sleeper_body = sleeper_report.split("\n\n", 1)[-1]
+    opening = next((line.strip() for line in sleeper_body.splitlines() if line.strip()), "Fantasy GM in the Group Chat 🏈")
+    if " in the " not in opening:
+        opening = "Fantasy GM in the Group Chat 🏈"
+    return opening + "\n\n" + title + "\n\n" + sleeper_report + "\n\n---\n\n" + espn_report
 
 
 def send_email(subject, report):

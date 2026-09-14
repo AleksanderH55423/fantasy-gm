@@ -162,7 +162,19 @@ Any close calls on my roster, with brief reasoning.
 1-2 realistic trade proposals naming specific other teams/owners in this
 league, based on roster mismatches you identified above.
 
-Keep it concise and skimmable. Do not pad with generic disclaimers."""
+Keep it concise and skimmable. Do not pad with generic disclaimers.
+
+STYLE RULES:
+- Sound like a funny, high-energy frat bro giving real fantasy advice: casual,
+  confident, and playful, but never hostile or mean-spirited.
+- Your very first line must be a standalone joke in the form "[Player] in the
+  [funny place]" followed by one fitting emoji. Base it on a player who balled
+  out, flopped, or affected a manager's fantasy week. Example: "Puka in the
+  worst" or  "Alec Pierce in being constantly injured" or even "The Panthers
+   in getting dogwalked by Caleb Williams". Do not put a markdown header before this line. This should be a 
+  roast of a player or a shout-out for a player who had a great week.
+- Use 1-2 fitting emojis per section. Keep the actual recommendations specific
+  and useful beneath the jokes."""
 
 
 def generate_report_openai(my_name, my_roster_labels, league_summary, trending_adds, week):
