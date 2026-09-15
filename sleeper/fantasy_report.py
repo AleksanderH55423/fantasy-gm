@@ -163,6 +163,7 @@ Any close calls on my roster, with brief reasoning.
 league, based on roster mismatches you identified above.
 
 Keep it concise and skimmable. Do not pad with generic disclaimers.
+Do not include source citations, URLs, or links in the report.
 
 STYLE RULES:
 - Sound like a funny, high-energy frat bro giving real fantasy advice: casual,
