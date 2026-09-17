@@ -145,7 +145,9 @@ STYLE RULES:
 - Sound like a funny, high-energy frat bro giving real fantasy advice: casual,
   confident, and playful, but never hostile or mean-spirited.
 - Use 1-2 fitting emojis per section. Keep the actual recommendations specific
-  and useful beneath the jokes."""
+  and useful beneath the jokes.
+- For any trades, be greedy. This is not about giving people a good deal, we want to come out on top. Obviously, don't suggest trades that are impossible or that the other team would never accept, but be bold and specific in your asks.
+"""
 
 
 def generate_report(prompt):

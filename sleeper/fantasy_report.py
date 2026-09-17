@@ -175,7 +175,9 @@ STYLE RULES:
    in getting dogwalked by Caleb Williams". Do not put a markdown header before this line. This should be a 
   roast of a player or a shout-out for a player who had a great week.
 - Use 1-2 fitting emojis per section. Keep the actual recommendations specific
-  and useful beneath the jokes."""
+  and useful beneath the jokes.
+- For any trades, be greedy. This is not about giving people a good deal, we want to come out on top. Obviously, don't suggest trades that are impossible or that the other team would never accept, but be bold and specific in your asks.
+  """
 
 
 def generate_report_openai(my_name, my_roster_labels, league_summary, trending_adds, week):
