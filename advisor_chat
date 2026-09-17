@@ -6,6 +6,7 @@ shared root .env, asks which league to use, and keeps one conversation open.
 
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,16 @@ BENCH_SLOTS = {20, 21}
 LIVE_NEWS_TERMS = {
     "injury", "injured", "questionable", "doubtful", "out", "practice",
     "weather", "matchup", "start", "sit", "news", "active", "inactive",
+}
+RESET = "\033[0m"
+POSITION_COLORS = {
+    "QB": "\033[31m",       # red
+    "RB": "\033[32m",       # green
+    "WR": "\033[34m",       # blue
+    "TE": "\033[38;5;208m", # orange
+    "K": "\033[35m",        # purple
+    "D/ST": "\033[38;5;94m", # brown
+    "DEF": "\033[38;5;94m",
 }
 
 
@@ -70,10 +81,14 @@ def build_sleeper_context():
         raise ValueError(f"Could not find Sleeper user '{username}' in this league.")
 
     owners = {u["user_id"]: u.get("display_name", "Unknown") for u in users}
-    team_rosters, team_summaries, my_roster = {}, [], None
+    team_rosters, team_summaries, my_roster, player_positions = {}, [], None, {}
     for roster in rosters:
         owner = owners.get(roster.get("owner_id"), "Unknown")
         player_ids = roster.get("players") or []
+        player_positions.update({
+            sleeper_label(pid, players).rsplit(" (", 1)[0].lower(): players.get(pid, {}).get("position", "")
+            for pid in player_ids
+        })
         team_rosters[owner.lower()] = f"{owner}: {', '.join(sleeper_label(pid, players) for pid in player_ids)}"
         team_summaries.append(f"- {owner}: {position_summary(player_ids, players)}")
         if roster.get("owner_id") == user["user_id"]:
@@ -86,7 +101,12 @@ def build_sleeper_context():
 
     trending = get_json(f"{SLEEPER_BASE}/players/nfl/trending/add?lookback_hours=24&limit=15")
     rostered = {pid for roster in rosters for pid in (roster.get("players") or [])}
-    waivers = [sleeper_label(item["player_id"], players) for item in trending if item.get("player_id") not in rostered and item.get("player_id") in players]
+    waiver_items = [item for item in trending if item.get("player_id") not in rostered and item.get("player_id") in players]
+    waivers = [sleeper_label(item["player_id"], players) for item in waiver_items]
+    player_positions.update({
+        sleeper_label(item["player_id"], players).rsplit(" (", 1)[0].lower(): players.get(item["player_id"], {}).get("position", "")
+        for item in waiver_items
+    })
     base = (
         f"Platform: Sleeper. NFL week: {state.get('week', 'current')}. Owner: {username}.\n"
         f"MY ROSTER\n{my_roster or 'Roster unavailable'}\n\n"
@@ -94,7 +114,7 @@ def build_sleeper_context():
         "OTHER TEAM POSITION SUMMARIES (full rosters are supplied only when a team is named)\n"
         + "\n".join(team_summaries)
     )
-    return {"base": base, "team_rosters": team_rosters}
+    return {"base": base, "team_rosters": team_rosters, "player_positions": player_positions}
 
 
 def espn_player_label(entry):
@@ -116,11 +136,17 @@ def build_espn_context():
     league = get_json(url, params=[("view", "mSettings"), ("view", "mStatus"), ("view", "mTeam"), ("view", "mRoster")], cookies=cookies)
 
     teams = league.get("teams", [])
-    team_rosters, team_summaries, my_roster, rostered_ids = {}, [], None, set()
+    team_rosters, team_summaries, my_roster, rostered_ids, player_positions = {}, [], None, set(), {}
     for team in teams:
         name = " ".join(filter(None, (team.get("location"), team.get("nickname")))) or f"Team {team['id']}"
         entries = team.get("roster", {}).get("entries", [])
         labels = [espn_player_label(entry) for entry in entries]
+        player_positions.update({
+            label.rsplit(" (", 1)[0].lower(): ESPN_POSITION_MAP.get(
+                entry.get("playerPoolEntry", {}).get("player", {}).get("defaultPositionId"), "FLEX"
+            )
+            for entry, label in zip(entries, labels)
+        })
         team_rosters[name.lower()] = f"{name}: {', '.join(labels)}"
         positions = [ESPN_POSITION_MAP.get(entry.get("playerPoolEntry", {}).get("player", {}).get("defaultPositionId"), "FLEX") for entry in entries]
         team_summaries.append(f"- {name}: " + ", ".join(f"{p}:{positions.count(p)}" for p in sorted(set(positions))))
@@ -133,7 +159,14 @@ def build_espn_context():
     player_filter = {"players": {"filterStatus": {"value": ["FREEAGENT", "WAIVERS"]}, "sortPercOwned": {"sortPriority": 1, "sortAsc": False}, "limit": 25}}
     try:
         player_data = get_json(url, params={"view": "kona_player_info"}, headers={"x-fantasy-filter": json.dumps(player_filter)}, cookies=cookies)
-        waivers = [espn_player_label(item) for item in player_data.get("players", []) if espn_player_id(item) not in rostered_ids]
+        waiver_items = [item for item in player_data.get("players", []) if espn_player_id(item) not in rostered_ids]
+        waivers = [espn_player_label(item) for item in waiver_items]
+        player_positions.update({
+            espn_player_label(item).rsplit(" (", 1)[0].lower(): ESPN_POSITION_MAP.get(
+                item.get("player", item.get("playerPoolEntry", {}).get("player", {})).get("defaultPositionId"), "FLEX"
+            )
+            for item in waiver_items
+        })
     except requests.RequestException:
         waivers = []
 
@@ -143,7 +176,7 @@ def build_espn_context():
         f"VERIFIED AVAILABLE PLAYERS\n{', '.join(waivers) or 'Unavailable; do not invent waiver players.'}\n\n"
         "OTHER TEAM POSITION SUMMARIES (full rosters are supplied only when a team is named)\n" + "\n".join(team_summaries)
     )
-    return {"base": base, "team_rosters": team_rosters}
+    return {"base": base, "team_rosters": team_rosters, "player_positions": player_positions}
 
 
 def relevant_rosters(question, context):
@@ -157,11 +190,54 @@ def needs_live_news(question):
     return bool(words & LIVE_NEWS_TERMS)
 
 
+def highlight_player_names(text, player_positions):
+    """Color known player names by position without partial-word matches."""
+    names = sorted((name for name, position in player_positions.items() if position in POSITION_COLORS and len(name) > 2), key=len, reverse=True)
+    if not names:
+        return text
+    pattern = rf"(?<!\w)({'|'.join(re.escape(name) for name in names)})(?!\w)"
+    return re.sub(
+        pattern,
+        lambda match: f"{POSITION_COLORS[player_positions[match.group(0).lower()]]}{match.group(0)}{RESET}",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
+NAME_SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
+
+
+def add_last_name_fallback(player_positions):
+    """Add last-name-only lookups for players whose full name isn't matched.
+
+    A last name is only added when it's safe to color on its own: either
+    exactly one known player has that last name, or every player who shares
+    it plays the same position (so the color is correct regardless of which
+    one was meant). Ambiguous last names (different positions) are skipped
+    rather than guessed at.
+    """
+    combined = dict(player_positions)
+    by_last_name = {}
+    for full_name, position in player_positions.items():
+        parts = [p for p in full_name.split() if p.strip(".").lower() not in NAME_SUFFIXES]
+        if not parts:
+            continue
+        last_name = parts[-1]
+        by_last_name.setdefault(last_name, set()).add(position)
+
+    for last_name, positions in by_last_name.items():
+        if len(positions) == 1 and last_name not in combined:
+            combined[last_name] = next(iter(positions))
+
+    return combined
+
+
 def run_chat(context):
     from openai import OpenAI
 
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     model = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
+    display_positions = add_last_name_fallback(context["player_positions"])
     system_prompt = (
         "You are a concise, practical fantasy-football advisor. Use only the verified waiver pool provided. "
         "For trade ideas, use team position summaries and request a named trade partner when exact roster details are needed. "
@@ -192,7 +268,7 @@ def run_chat(context):
         except Exception as exc:
             print(f"\nCould not get an answer: {exc}\n")
             continue
-        print(f"\nAdvisor: {response.output_text}\n")
+        print(f"\nAdvisor: {highlight_player_names(response.output_text, display_positions)}\n")
         previous_response_id, first_turn = response.id, False
 
 
