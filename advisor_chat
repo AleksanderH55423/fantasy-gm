@@ -1,0 +1,215 @@
+"""Interactive, league-aware fantasy-football advisor.
+
+Run ``python advisor_chat`` from the repository root. The script reads the
+shared root .env, asks which league to use, and keeps one conversation open.
+"""
+
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
+
+ROOT_DIR = Path(__file__).resolve().parent
+SLEEPER_BASE = "https://api.sleeper.app/v1"
+SLEEPER_PLAYERS_CACHE = ROOT_DIR / "sleeper" / "players_cache.json"
+CACHE_MAX_AGE_SECONDS = 60 * 60 * 24 * 3
+ESPN_POSITION_MAP = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "D/ST"}
+BENCH_SLOTS = {20, 21}
+LIVE_NEWS_TERMS = {
+    "injury", "injured", "questionable", "doubtful", "out", "practice",
+    "weather", "matchup", "start", "sit", "news", "active", "inactive",
+}
+
+
+def get_json(url, **kwargs):
+    response = requests.get(url, timeout=25, **kwargs)
+    response.raise_for_status()
+    return response.json()
+
+
+def cached_sleeper_players():
+    """Reuse the weekly-report cache instead of downloading Sleeper's ~5 MB map."""
+    if SLEEPER_PLAYERS_CACHE.exists():
+        age = datetime.now().timestamp() - SLEEPER_PLAYERS_CACHE.stat().st_mtime
+        if age < CACHE_MAX_AGE_SECONDS:
+            with SLEEPER_PLAYERS_CACHE.open(encoding="utf-8") as cache_file:
+                return json.load(cache_file)
+    players = get_json(f"{SLEEPER_BASE}/players/nfl")
+    with SLEEPER_PLAYERS_CACHE.open("w", encoding="utf-8") as cache_file:
+        json.dump(players, cache_file)
+    return players
+
+
+def sleeper_label(player_id, players):
+    player = players.get(player_id, {})
+    name = f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+    return f"{name or player_id} ({player.get('position', '?')}, {player.get('team') or 'FA'})"
+
+
+def position_summary(player_ids, players):
+    counts = {}
+    for player_id in player_ids:
+        position = players.get(player_id, {}).get("position", "?")
+        counts[position] = counts.get(position, 0) + 1
+    return ", ".join(f"{position}:{count}" for position, count in sorted(counts.items())) or "no players"
+
+
+def build_sleeper_context():
+    league_id = os.environ["SLEEPER_LEAGUE_ID"]
+    username = os.environ["SLEEPER_USERNAME"]
+    rosters = get_json(f"{SLEEPER_BASE}/league/{league_id}/rosters")
+    users = get_json(f"{SLEEPER_BASE}/league/{league_id}/users")
+    state = get_json(f"{SLEEPER_BASE}/state/nfl")
+    players = cached_sleeper_players()
+    user = next((u for u in users if u.get("display_name", "").lower() == username.lower()), None)
+    if not user:
+        raise ValueError(f"Could not find Sleeper user '{username}' in this league.")
+
+    owners = {u["user_id"]: u.get("display_name", "Unknown") for u in users}
+    team_rosters, team_summaries, my_roster = {}, [], None
+    for roster in rosters:
+        owner = owners.get(roster.get("owner_id"), "Unknown")
+        player_ids = roster.get("players") or []
+        team_rosters[owner.lower()] = f"{owner}: {', '.join(sleeper_label(pid, players) for pid in player_ids)}"
+        team_summaries.append(f"- {owner}: {position_summary(player_ids, players)}")
+        if roster.get("owner_id") == user["user_id"]:
+            starters = roster.get("starters") or []
+            bench = [pid for pid in player_ids if pid not in starters]
+            my_roster = (
+                f"Starters: {', '.join(sleeper_label(pid, players) for pid in starters)}\n"
+                f"Bench: {', '.join(sleeper_label(pid, players) for pid in bench)}"
+            )
+
+    trending = get_json(f"{SLEEPER_BASE}/players/nfl/trending/add?lookback_hours=24&limit=15")
+    rostered = {pid for roster in rosters for pid in (roster.get("players") or [])}
+    waivers = [sleeper_label(item["player_id"], players) for item in trending if item.get("player_id") not in rostered and item.get("player_id") in players]
+    base = (
+        f"Platform: Sleeper. NFL week: {state.get('week', 'current')}. Owner: {username}.\n"
+        f"MY ROSTER\n{my_roster or 'Roster unavailable'}\n\n"
+        f"VERIFIED TRENDING AVAILABLE PLAYERS\n{', '.join(waivers) or 'None returned'}\n\n"
+        "OTHER TEAM POSITION SUMMARIES (full rosters are supplied only when a team is named)\n"
+        + "\n".join(team_summaries)
+    )
+    return {"base": base, "team_rosters": team_rosters}
+
+
+def espn_player_label(entry):
+    player = entry.get("playerPoolEntry", {}).get("player", entry.get("player", entry))
+    position = ESPN_POSITION_MAP.get(player.get("defaultPositionId"), "FLEX")
+    injury = player.get("injuryStatus")
+    suffix = f"; {injury}" if injury and injury != "ACTIVE" else ""
+    return f"{player.get('fullName', 'Unknown player')} ({position}{suffix})"
+
+
+def espn_player_id(entry):
+    return entry.get("player", entry.get("playerPoolEntry", {}).get("player", {})).get("id")
+
+
+def build_espn_context():
+    league_id, season, my_team_id = (os.environ[key] for key in ("ESPN_LEAGUE_ID", "ESPN_SEASON", "ESPN_TEAM_ID"))
+    url = f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{season}/segments/0/leagues/{league_id}"
+    cookies = {key: value for key, value in {"espn_s2": os.getenv("ESPN_S2"), "SWID": os.getenv("ESPN_SWID")}.items() if value}
+    league = get_json(url, params=[("view", "mSettings"), ("view", "mStatus"), ("view", "mTeam"), ("view", "mRoster")], cookies=cookies)
+
+    teams = league.get("teams", [])
+    team_rosters, team_summaries, my_roster, rostered_ids = {}, [], None, set()
+    for team in teams:
+        name = " ".join(filter(None, (team.get("location"), team.get("nickname")))) or f"Team {team['id']}"
+        entries = team.get("roster", {}).get("entries", [])
+        labels = [espn_player_label(entry) for entry in entries]
+        team_rosters[name.lower()] = f"{name}: {', '.join(labels)}"
+        positions = [ESPN_POSITION_MAP.get(entry.get("playerPoolEntry", {}).get("player", {}).get("defaultPositionId"), "FLEX") for entry in entries]
+        team_summaries.append(f"- {name}: " + ", ".join(f"{p}:{positions.count(p)}" for p in sorted(set(positions))))
+        rostered_ids.update(espn_player_id(entry) for entry in entries)
+        if str(team.get("id")) == str(my_team_id):
+            starters = [espn_player_label(entry) for entry in entries if entry.get("lineupSlotId") not in BENCH_SLOTS]
+            bench = [espn_player_label(entry) for entry in entries if entry.get("lineupSlotId") in BENCH_SLOTS]
+            my_roster = f"Starters: {', '.join(starters)}\nBench: {', '.join(bench)}"
+
+    player_filter = {"players": {"filterStatus": {"value": ["FREEAGENT", "WAIVERS"]}, "sortPercOwned": {"sortPriority": 1, "sortAsc": False}, "limit": 25}}
+    try:
+        player_data = get_json(url, params={"view": "kona_player_info"}, headers={"x-fantasy-filter": json.dumps(player_filter)}, cookies=cookies)
+        waivers = [espn_player_label(item) for item in player_data.get("players", []) if espn_player_id(item) not in rostered_ids]
+    except requests.RequestException:
+        waivers = []
+
+    week = league.get("status", {}).get("currentMatchupPeriod", "current")
+    base = (
+        f"Platform: ESPN. NFL week: {week}. My team ID: {my_team_id}.\nMY ROSTER\n{my_roster or 'Roster unavailable'}\n\n"
+        f"VERIFIED AVAILABLE PLAYERS\n{', '.join(waivers) or 'Unavailable; do not invent waiver players.'}\n\n"
+        "OTHER TEAM POSITION SUMMARIES (full rosters are supplied only when a team is named)\n" + "\n".join(team_summaries)
+    )
+    return {"base": base, "team_rosters": team_rosters}
+
+
+def relevant_rosters(question, context):
+    question_lower = question.lower()
+    matches = [roster for name, roster in context["team_rosters"].items() if name in question_lower]
+    return "\n\nFULL ROSTER(S) REFERENCED IN THIS QUESTION:\n" + "\n".join(matches) if matches else ""
+
+
+def needs_live_news(question):
+    words = set(question.lower().replace("/", " ").replace("?", " ").split())
+    return bool(words & LIVE_NEWS_TERMS)
+
+
+def run_chat(context):
+    from openai import OpenAI
+
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    model = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
+    system_prompt = (
+        "You are a concise, practical fantasy-football advisor. Use only the verified waiver pool provided. "
+        "For trade ideas, use team position summaries and request a named trade partner when exact roster details are needed. "
+        "Do not include citations or links.\n\nLEAGUE CONTEXT:\n" + context["base"]
+    )
+    previous_response_id, first_turn = None, True
+    print("\nFantasy advisor ready. Ask about trades, waivers, or start/sit calls. Type 'exit' or 'quit' to end.\n")
+    while True:
+        try:
+            question = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nEnding session.")
+            return
+        if question.lower() in {"exit", "quit"}:
+            print("Ending session.")
+            return
+        if not question:
+            continue
+        question_with_context = f"Question: {question}{relevant_rosters(question, context)}"
+        request = {"model": model, "input": f"{system_prompt}\n\n{question_with_context}" if first_turn else question_with_context, "previous_response_id": previous_response_id}
+        if needs_live_news(question):
+            request["tools"] = [{"type": "web_search"}]
+        try:
+            response = client.responses.create(**request)
+            if getattr(response, "incomplete_details", None) or getattr(response, "error", None):
+                detail = getattr(response, "error", None) or response.incomplete_details
+                raise RuntimeError(getattr(detail, "reason", "The response was incomplete."))
+        except Exception as exc:
+            print(f"\nCould not get an answer: {exc}\n")
+            continue
+        print(f"\nAdvisor: {response.output_text}\n")
+        previous_response_id, first_turn = response.id, False
+
+
+def main():
+    load_dotenv(ROOT_DIR / ".env")
+    print("Which league? (1) Sleeper  (2) ESPN")
+    choice = input("> ").strip()
+    try:
+        context = build_sleeper_context() if choice == "1" else build_espn_context() if choice == "2" else None
+        if context is None:
+            print("Please enter 1 or 2.")
+            sys.exit(1)
+    except (KeyError, ValueError, requests.RequestException, OSError, json.JSONDecodeError) as exc:
+        print(f"Could not load league data: {exc}")
+        sys.exit(1)
+    run_chat(context)
+
+
+if __name__ == "__main__":
+    main()
